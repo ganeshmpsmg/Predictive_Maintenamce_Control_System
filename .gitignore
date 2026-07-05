@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+mlruns/
+mlflow.db
+*.log
+
+# Keep model artifacts out of git by default (large binary files);
+# remove this line if you want to commit trained models for a quick demo.
+models/*.joblib
+models/*.keras
+venv312/
+catboost_info/
+__pycache__/
+*.pyc
+reports/
+models/
