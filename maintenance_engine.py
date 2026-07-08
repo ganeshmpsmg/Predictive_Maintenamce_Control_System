@@ -90,9 +90,24 @@ def generate_recommendation(
     machine_id_col: str = "unit_id",
 ) -> MaintenanceRecommendation:
     """Build a single maintenance recommendation from one prediction row."""
+    
+    # --- FIXED: Handle duplicate risk_level columns safely ---
     risk_level = row.get("risk_level", "Medium")
-    health_score = float(row.get("health_score", 50.0))
-    failure_probability = float(row.get("failure_probability", 0.5))
+    if isinstance(risk_level, pd.Series):
+        risk_level = risk_level.iloc[0]
+    risk_level = str(risk_level)
+
+    # --- FIXED: Handle duplicate health_score columns safely ---
+    health_score = row.get("health_score", 50.0)
+    if isinstance(health_score, pd.Series):
+        health_score = health_score.iloc[0]
+    health_score = float(health_score)
+
+    # --- FIXED: Handle duplicate failure_probability columns safely ---
+    failure_probability = row.get("failure_probability", 0.5)
+    if isinstance(failure_probability, pd.Series):
+        failure_probability = failure_probability.iloc[0]
+    failure_probability = float(failure_probability)
 
     driving_sensors = _identify_driving_sensors(row, sensor_names)
     primary_sensor = driving_sensors[0] if driving_sensors else None
@@ -112,8 +127,13 @@ def generate_recommendation(
         "Low": f"No action required beyond routine monitoring of {component.lower()}.",
     }.get(risk_level, f"Monitor {component.lower()}.")
 
+    # --- FIXED: Defensive machine_id handling in case it's also a Series ---
+    machine_id_val = row.get(machine_id_col, "unknown")
+    if isinstance(machine_id_val, pd.Series):
+        machine_id_val = machine_id_val.iloc[0]
+
     return MaintenanceRecommendation(
-        machine_id=str(row.get(machine_id_col, "unknown")),
+        machine_id=str(machine_id_val),
         risk_level=risk_level,
         health_score=health_score,
         failure_probability=failure_probability,

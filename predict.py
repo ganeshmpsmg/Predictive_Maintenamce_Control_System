@@ -90,10 +90,6 @@ class PredictiveMaintenancePipeline:
     def _predict_failure_probability(self, df_features: pd.DataFrame) -> np.ndarray:
         X = df_features[self.feature_columns]
         if self.best_failure_model_name == "LSTM":
-            # Fallback: LSTM needs a sequence window; for single-row/batch tabular
-            # inference without full history we approximate with the tree runner-up
-            # if available, else return a neutral 0.5. (See README for real-time
-            # sequence-buffer implementation notes.)
             try:
                 fallback = load_sklearn_model("failure_lightgbm")
                 return fallback.predict_proba(X)[:, 1]
@@ -112,10 +108,6 @@ class PredictiveMaintenancePipeline:
         df = remove_duplicates(df)
         df = detect_outliers(df)
 
-        # The scaler was fit on a fixed set of sensor columns during training.
-        # If the caller's data is missing some of those columns (e.g. a partial
-        # sensor upload), fill them with the training-time mean rather than
-        # crashing -- a neutral "no signal" placeholder in the original scale.
         expected_cols = list(getattr(self.scaler, "feature_names_in_", []))
         if not expected_cols:
             expected_cols = [c for c in df.select_dtypes(include=[np.number]).columns
@@ -147,8 +139,15 @@ class PredictiveMaintenancePipeline:
         if latest_cycle_only and "unit_id" in df.columns and "cycle" in df.columns:
             df = df.sort_values("cycle").groupby("unit_id").tail(1).reset_index(drop=True)
 
+        # --- FIXED: Clean up duplicate columns with proper logging pipeline output ---
+        duplicate_cols = df.columns[df.columns.duplicated()].tolist()
+        if duplicate_cols:
+            logger.warning(f"Duplicate columns detected and removed: {duplicate_cols}")
+            df = df.loc[:, ~df.columns.duplicated()]
+
         available_sensors = [s for s in RAW_SENSOR_NAMES if s in df.columns]
         recommendations = generate_recommendations_batch(df, available_sensors)
+        
         # health_score / risk_level / failure_probability are already present in
         # df (from predict_rul); drop the recommendation engine's copies to avoid
         # duplicate columns after concat.
