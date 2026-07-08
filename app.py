@@ -57,7 +57,7 @@ RISK_COLOR_MAP = {"Low": COLORS["green"], "Medium": COLORS["blue"], "High": COLO
 
 CUSTOM_CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght=500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 html, body, [class*="css"] {{
     font-family: 'Inter', sans-serif;
@@ -251,7 +251,7 @@ else:
 
 report = run_inference(pipeline, raw_df, latest_only)
 
-# machine selector (populate after we know what's in the report)
+# machine selector
 machine_ids = sorted(report["unit_id"].dropna().unique().tolist()) if "unit_id" in report.columns else []
 selected_machine = st.sidebar.selectbox("Select machine (unit_id)", machine_ids, index=0 if machine_ids else None)
 
@@ -344,13 +344,33 @@ with tab_overview:
     styled = report[display_cols].sort_values("health_score")
     st.dataframe(styled, width='stretch', height=320)
 
+    # From Verification lines: Show active trace data
+    st.write("Report columns:")
+    st.write(report.columns.tolist())
+
     st.markdown("##### Failure Timeline (RUL by machine)")
     if "estimated_rul_cycles" in report.columns:
         timeline = report.sort_values("estimated_rul_cycles")
+        
+        # Robust Dynamic Axis Slicing
+        if "unit_id" in timeline.columns:
+            x_col = "unit_id"
+        elif "machine_id" in timeline.columns:
+            x_col = "machine_id"
+        else:
+            timeline = timeline.reset_index()
+            x_col = "index"
+
         fig = px.bar(
-            timeline, x="unit_id", y="estimated_rul_cycles", color="risk_level",
+            timeline, 
+            x=x_col, 
+            y="estimated_rul_cycles", 
+            color="risk_level",
             color_discrete_map=RISK_COLOR_MAP,
-            labels={"unit_id": "Machine ID", "estimated_rul_cycles": "Remaining Useful Life (cycles)"},
+            labels={
+                x_col: "Machine", 
+                "estimated_rul_cycles": "Remaining Useful Life (cycles)"
+            },
         )
         fig.update_layout(template=PLOTLY_TEMPLATE, height=350, xaxis_type="category")
         st.plotly_chart(fig, width='stretch')
@@ -416,14 +436,38 @@ with tab_anomaly:
                            xaxis_title="Operating Cycle", yaxis_title="Ensemble Anomaly Score (0-1)")
         st.plotly_chart(fig, width='stretch')
 
-    detector_cols = [c for c in ["anomaly_isoforest", "anomaly_ocsvm", "anomaly_lof", "anomaly_autoencoder"]
-                      if c in hist_report.columns]
+    # Defensive Anomaly Table Block
+    detector_cols = [
+        c for c in [
+            "anomaly_isoforest",
+            "anomaly_ocsvm",
+            "anomaly_lof",
+            "anomaly_autoencoder",
+        ]
+        if c in hist_report.columns
+    ]
+
     if detector_cols:
         st.markdown("##### Per-Detector Flags (most recent readings)")
-        st.dataframe(
-            hist_report[["cycle"] + detector_cols].tail(15).set_index("cycle"),
-            width='stretch',
-        )
+        st.write("hist_report columns:", hist_report.columns.tolist())
+        
+        # Clean duplicates dynamically to prevent slicing index crashes
+        hist_report = hist_report.loc[:, ~hist_report.columns.duplicated()]
+        
+        cols_to_show = []
+        if "cycle" in hist_report.columns:
+            cols_to_show.append("cycle")
+            
+        cols_to_show.extend(detector_cols)
+        
+        # Keep only tracking entries that actually exist inside index range
+        cols_to_show = [c for c in cols_to_show if c in hist_report.columns]
+        table = hist_report.loc[:, cols_to_show].tail(15)
+        
+        if "cycle" in table.columns:
+            table = table.set_index("cycle")
+            
+        st.dataframe(table, width="stretch")
 
 # ---------------- TAB 4: Explainable AI ----------------
 with tab_xai:
@@ -490,8 +534,12 @@ with tab_maint:
             )
 
     st.markdown("##### All Machines — Maintenance Priority Queue")
-    priority_order = {"Immediate (schedule within 24 hours)": 0, "Urgent (schedule within 3-5 days)": 1,
-                       "Planned (schedule within 2-3 weeks)": 2, "Routine (monitor at next scheduled service)": 3}
+    priority_order = {
+        "Immediate (schedule within 24 hours)": 0,
+        "Urgent (schedule within 3-5 days)": 1,
+        "Planned (schedule within 2-3 weeks)": 2,
+        "Routine (monitor at next scheduled service)": 3
+    }
     if "maintenance_priority" in report.columns:
         queue = report.copy()
         queue["_sort"] = queue["maintenance_priority"].map(priority_order).fillna(9)
@@ -500,96 +548,3 @@ with tab_maint:
                 "maintenance_priority", "estimated_cost_usd", "estimated_downtime_hours"]
         cols = [c for c in cols if c in queue.columns]
         st.dataframe(queue[cols], width='stretch', height=400)
-
-# ---------------- TAB 6: Model Performance ----------------
-with tab_perf:
-    summary = load_training_summary()
-    if summary:
-        st.markdown(f"##### Deployed Failure-Prediction Model: `{summary.get('best_failure_model', 'N/A')}`")
-        metrics_df = pd.DataFrame(summary.get("failure_model_metrics", {})).T
-        st.dataframe(metrics_df.style.format("{:.3f}").highlight_max(axis=0, color=f"{COLORS['green']}55"),
-                     width='stretch')
-
-        st.markdown("##### Model Comparison — ROC-AUC")
-        if not metrics_df.empty:
-            fig = px.bar(metrics_df.reset_index(), x="index", y="ROC_AUC",
-                         labels={"index": "Model", "ROC_AUC": "ROC-AUC"})
-            fig.update_traces(marker_color=COLORS["amber"])
-            fig.update_layout(template=PLOTLY_TEMPLATE, height=350)
-            st.plotly_chart(fig, width='stretch')
-
-        rul_metrics = summary.get("rul_model_metrics", {})
-        if rul_metrics:
-            st.markdown("##### RUL Regression Metrics")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("MAE (cycles)", f"{rul_metrics.get('MAE', 0):.1f}")
-            m2.metric("RMSE (cycles)", f"{rul_metrics.get('RMSE', 0):.1f}")
-            m3.metric("R²", f"{rul_metrics.get('R2', 0):.3f}")
-    else:
-        st.info("Run `train.py` to generate model performance metrics.")
-
-    curve_data = load_curve_data()
-    if curve_data is not None:
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            st.markdown("##### ROC Curve")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=curve_data["fpr"], y=curve_data["tpr"], mode="lines",
-                                      line=dict(color=COLORS["amber"], width=3), name="ROC"))
-            fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                                      line=dict(color=COLORS["text_muted"], dash="dash"), name="Random"))
-            fig.update_layout(template=PLOTLY_TEMPLATE, height=350,
-                               xaxis_title="False Positive Rate", yaxis_title="True Positive Rate")
-            st.plotly_chart(fig, width='stretch')
-        with cc2:
-            st.markdown("##### Precision-Recall Curve")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=curve_data["recall"], y=curve_data["precision"], mode="lines",
-                                      line=dict(color=COLORS["blue"], width=3)))
-            fig.update_layout(template=PLOTLY_TEMPLATE, height=350,
-                               xaxis_title="Recall", yaxis_title="Precision")
-            st.plotly_chart(fig, width='stretch')
-
-        st.markdown("##### Confusion Matrix")
-        cm = curve_data["confusion_matrix"]
-        fig = px.imshow(cm, text_auto=True, color_continuous_scale="Oranges",
-                         labels=dict(x="Predicted", y="Actual"),
-                         x=["No Failure", "Failure"], y=["No Failure", "Failure"])
-        fig.update_layout(template=PLOTLY_TEMPLATE, height=350)
-        st.plotly_chart(fig, width='stretch')
-    else:
-        st.caption("ROC/PR/Confusion-matrix data available for tree-based deployed models "
-                   "(not generated when the LSTM is the top performer — see training_summary.json).")
-
-# ---------------- TAB 7: Compare Machines ----------------
-with tab_compare:
-    st.markdown("##### Multi-Machine Comparison")
-    compare_ids = st.multiselect(
-        "Select machines to compare", machine_ids,
-        default=machine_ids[:3] if len(machine_ids) >= 3 else machine_ids,
-    )
-    if compare_ids:
-        compare_df = report[report["unit_id"].isin(compare_ids)]
-        metric_choice = st.radio(
-            "Metric", ["health_score", "failure_probability", "estimated_rul_cycles", "anomaly_score"],
-            horizontal=True,
-        )
-        fig = px.bar(
-            compare_df, x="unit_id", y=metric_choice, color="risk_level",
-            color_discrete_map=RISK_COLOR_MAP,
-            labels={"unit_id": "Machine ID", metric_choice: metric_choice.replace("_", " ").title()},
-        )
-        fig.update_layout(template=PLOTLY_TEMPLATE, height=380, xaxis_type="category")
-        st.plotly_chart(fig, width='stretch')
-
-        cols = ["unit_id", "health_score", "risk_level", "failure_probability",
-                "estimated_rul_cycles", "anomaly_score", "likely_component", "maintenance_priority"]
-        cols = [c for c in cols if c in compare_df.columns]
-        st.dataframe(compare_df[cols].set_index("unit_id"), width='stretch')
-
-st.markdown("---")
-st.caption(
-    "Predictive Maintenance System · Built with scikit-learn, XGBoost, LightGBM, CatBoost, "
-    "TensorFlow/Keras, SHAP, and Streamlit · Synthetic demo data schema-compatible with "
-    "NASA C-MAPSS and AI4I datasets."
-)
